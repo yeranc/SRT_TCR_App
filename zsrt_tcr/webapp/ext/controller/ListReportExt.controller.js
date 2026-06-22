@@ -6,7 +6,11 @@ sap.ui.define([
     "use strict";
 
     return {
-        get_results: async function () {
+        /*
+        /* Method get_results
+        /* Fetch process logs for selected TCRs
+        */
+        get_results: function () {
             const aContexts = this.extensionAPI.getSelectedContexts();
 
             if (!aContexts || !aContexts.length) {
@@ -14,51 +18,86 @@ sap.ui.define([
                 return;
             }
 
-            this.getView().setBusy(true);
+            // Keep only one entry per TCR number
+            const mUnique = {};
+            aContexts.forEach(function (oContext) {
+                const oData = oContext.getObject();
+                mUnique[oData.vtgrrnr] = oData;
+            });
 
-            try {
-                const oModel = this.getView().getModel();
-                let aResults = [];
+            const aSelectedData = Object.values(mUnique);
 
-                const aPromises = aContexts.map(function (oContext) {
-                    const oData = oContext.getObject();
-                    return new Promise(function (resolve) {
-                        oModel.callFunction("/show_res", {
-                            method: "POST",
-                            urlParameters: {
-                                vtgrrnr: oData.vtgrrnr,
-                                Rank: oData.Rank,
-                                SequenceNumber: oData.SequenceNumber
-                            },
-                            success: function (oResult) {
-                                resolve(oResult.results || []);
-                            },
-                            error: function () {
-                                resolve([]);
-                            }
+            // Build filters for Processing ID + Source TCR Number
+            const aFilters = aSelectedData.map(function (oData) {
+                return new sap.ui.model.Filter({
+                    filters: [
+                        new sap.ui.model.Filter(
+                            "ProcessingId",
+                            sap.ui.model.FilterOperator.EQ,
+                            oData.processingID
+                        ),
+                        new sap.ui.model.Filter(
+                            "SourceNumber",
+                            sap.ui.model.FilterOperator.EQ,
+                            String(oData.vtgrrnr).padStart(20, "0")
+                        )
+                    ],
+                    and: true
+                });
+            });
+
+            // Combine filters
+            const oFilter = new sap.ui.model.Filter({
+                filters: aFilters,
+                and: false
+            });
+
+            // Read process log records
+            const oModel = this.getView().getModel();
+            oModel.read("/ProcessLog", {
+                filters: [oFilter],
+                success: function (oData) {
+                    const aResults = oData.results || [];
+
+                    // Check if selected TCR exists in returned logs, if not add an entry indicating it's not replicated
+                    aSelectedData.forEach(function (oSelected) {
+                        const sSelectedTcr = String(oSelected.vtgrrnr);
+                        const bFound = aResults.some(function (oResult) {
+                            return String(oResult.SourceNumber || "").replace(/^0+/, "") === sSelectedTcr;
                         });
+
+                        // If not found, add an entry indicating the TCR has not been replicated
+                        if (!bFound) {
+                            aResults.push({
+                                SourceNumber: oSelected.vtgrrnr,
+                                ObjectType: "TCR",
+                                Message: "TCR " + oSelected.vtgrrnr + " has not yet been replicated"
+                            });
+                        }
                     });
-                });
 
-                const aResponses = await Promise.all(aPromises);
-                aResponses.forEach(function (aResponse) {
-                    aResults.push(...aResponse);
-                });
+                    // Sort by TCR number
+                    aResults.sort(function (a, b) {
+                        return Number(a.SourceNumber) - Number(b.SourceNumber);
+                    });
 
-                this._showResultDialog(aResults);
+                    // Show results in table dialog
+                    this._showResultDialog(aResults);
 
-            } catch (e) {
-                MessageToast.show("Error fetching process logs");
-                console.error(e);
-            } finally {
-                this.getView().setBusy(false);
-            }
+                }.bind(this),
+
+                error: function () {
+                    MessageToast.show("Error fetching logs");
+                }
+            });
         },
 
+        /*
+        /* Method _showResultDialog
+        /* Display logs in a dialog table
+        */
         _showResultDialog: function (aResults) {
-            const oJsonModel = new JSONModel({
-                results: aResults
-            });
+            const oJsonModel = new JSONModel({ results: aResults });
 
             const oTable = new sap.m.Table({
                 growing: true,
@@ -75,24 +114,25 @@ sap.ui.define([
                 ]
             });
 
+            // Bind result data to table
             oTable.setModel(oJsonModel);
-
             oTable.bindItems({
                 path: "/results",
                 template: new sap.m.ColumnListItem({
                     cells: [
-                        new sap.m.Text({ text: "{mvtgrrnr}" }),
-                        new sap.m.Text({ text: "{object_type}" }),
-                        new sap.m.Text({ text: "{vtgrrnr}" }),
-                        new sap.m.Text({ text: "{processingID}" }),
-                        new sap.m.Text({ text: "{CreatedTCR}" }),
-                        new sap.m.Text({ text: "{syst}" }),
-                        new sap.m.Text({ text: "{type}" }),
-                        new sap.m.Text({ text: "{message}" })
+                        new sap.m.Text({ text: "{SourceNumber}" }),
+                        new sap.m.Text({ text: "{ObjectType}" }),
+                        new sap.m.Text({ text: "{SourceNumber}" }),
+                        new sap.m.Text({ text: "{ProcessingId}" }),
+                        new sap.m.Text({ text: "{TargetNumber}" }),
+                        new sap.m.Text({ text: "{Systemm}" }),
+                        new sap.m.Text({ text: "{Type}" }),
+                        new sap.m.Text({ text: "{Message}" })
                     ]
                 })
             });
 
+            // Export button
             const oExportButton = new sap.m.Button({
                 text: "Export",
                 type: "Emphasized",
@@ -101,6 +141,7 @@ sap.ui.define([
                 }.bind(this)
             });
 
+            // Results dialog
             const oDialog = new sap.m.Dialog({
                 title: "TCR Copy Logs",
                 contentWidth: "90%",
@@ -132,20 +173,18 @@ sap.ui.define([
             }
 
             const aCols = [
-                { label: "TCR", property: "mvtgrrnr" },
-                { label: "Process ID", property: "processingID" },
-                { label: "Object Type", property: "object_type" },
-                { label: "Source Number", property: "vtgrrnr" },
-                { label: "Message Type", property: "type" },
-                { label: "Message", property: "message" },
-                { label: "Created TCR", property: "CreatedTCR" },
-                { label: "System", property: "syst" }
+                { label: "TCR", property: "SourceNumber" },
+                { label: "Process ID", property: "ProcessingId" },
+                { label: "Object Type", property: "ObjectType" },
+                { label: "Source Number", property: "SourceNumber" },
+                { label: "Message Type", property: "Type" },
+                { label: "Message", property: "Message" },
+                { label: "Created TCR", property: "TargetNumber" },
+                { label: "System", property: "Systemm" }
             ];
 
             const oSheet = new Spreadsheet({
-                workbook: {
-                    columns: aCols
-                },
+                workbook: { columns: aCols },
                 dataSource: aData,
                 fileName: "TCR_Copy_Log.xlsx"
             });
@@ -158,6 +197,5 @@ sap.ui.define([
                     oSheet.destroy();
                 });
         }
-
     };
 });
