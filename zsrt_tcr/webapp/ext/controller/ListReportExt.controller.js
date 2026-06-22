@@ -18,7 +18,7 @@ sap.ui.define([
                 return;
             }
 
-            // Keep only one entry per TCR number
+            // Keep only one entry per TCR number in case of multiple selected rows for the same TCR
             const mUnique = {};
             aContexts.forEach(function (oContext) {
                 const oData = oContext.getObject();
@@ -27,49 +27,75 @@ sap.ui.define([
 
             const aSelectedData = Object.values(mUnique);
 
-            // Build filters for Processing ID + Source TCR Number
-            const aFilters = aSelectedData.map(function (oData) {
-                return new sap.ui.model.Filter({
-                    filters: [
-                        new sap.ui.model.Filter(
-                            "ProcessingId",
-                            sap.ui.model.FilterOperator.EQ,
-                            oData.processingID
-                        ),
-                        new sap.ui.model.Filter(
-                            "SourceNumber",
-                            sap.ui.model.FilterOperator.EQ,
-                            String(oData.vtgrrnr).padStart(20, "0")
-                        )
-                    ],
-                    and: true
-                });
+            // Map TCR number to Processing ID
+            const mapTcrToPid = {};
+            aSelectedData.forEach(function (o) {
+                mapTcrToPid[String(o.vtgrrnr).padStart(20, "0")] = String(o.processingID);
             });
 
-            // Combine filters
-            const oFilter = new sap.ui.model.Filter({
-                filters: aFilters,
-                and: false
+            // Sort by TCR number
+            aSelectedData.sort(function (a, b) {
+                return Number(a.vtgrrnr) - Number(b.vtgrrnr);
             });
 
-            // Read process log records
+            // Build SourceNumber ranges
+            const aRanges = [];
+            let nStart = null, nPrev = null;
+
+            aSelectedData.forEach(function (oData) {
+                const nCurrent = Number(oData.vtgrrnr);
+                if (nStart === null) {
+                    nStart = nCurrent;
+                    nPrev = nCurrent;
+                    return;
+                }
+                if (nCurrent === nPrev + 1) {
+                    nPrev = nCurrent;
+                    return;
+                }
+                aRanges.push({ from: nStart, to: nPrev });
+                nStart = nCurrent;
+                nPrev = nCurrent;
+            });
+            if (nStart !== null) {
+                aRanges.push({ from: nStart, to: nPrev });
+            }
+
+            // Build OData filters on Source TCR Number only
+            const aFilters = aRanges.map(function (oRange) {
+                const sFrom = String(oRange.from).padStart(20, "0");
+                const sTo = String(oRange.to).padStart(20, "0");
+
+                return oRange.from === oRange.to
+                    ? new sap.ui.model.Filter("SourceNumber", sap.ui.model.FilterOperator.EQ, sFrom)
+                    : new sap.ui.model.Filter("SourceNumber", sap.ui.model.FilterOperator.BT, sFrom, sTo);
+            });
+
+            const oFilter = new sap.ui.model.Filter({ filters: aFilters, and: false });
+
             const oModel = this.getView().getModel();
             oModel.read("/ProcessLog", {
                 filters: [oFilter],
                 success: function (oData) {
                     const aResults = oData.results || [];
 
-                    // Check if selected TCR exists in returned logs, if not add an entry indicating it's not replicated
+                    // Now keep only rows where ProcessingId matches the paired TCR
+                    const aFiltered = aResults.filter(function (oResult) {
+                        const sExpectedPid = mapTcrToPid[oResult.SourceNumber];
+                        return sExpectedPid !== undefined
+                            && String(oResult.ProcessingId) === sExpectedPid;
+                    });
+
+                    // Add "not replicated" for TCRs with no log entry
                     aSelectedData.forEach(function (oSelected) {
-                        const sSelectedTcr = String(oSelected.vtgrrnr);
-                        const bFound = aResults.some(function (oResult) {
-                            return String(oResult.SourceNumber || "").replace(/^0+/, "") === sSelectedTcr;
+                        const sPadded = String(oSelected.vtgrrnr).padStart(20, "0");
+                        const bFound = aFiltered.some(function (oResult) {
+                            return oResult.SourceNumber === sPadded;
                         });
 
-                        // If not found, add an entry indicating the TCR has not been replicated
                         if (!bFound) {
-                            aResults.push({
-                                SourceNumber: oSelected.vtgrrnr,
+                            aFiltered.push({
+                                SourceNumber: sPadded,
                                 ObjectType: "TCR",
                                 Message: "TCR " + oSelected.vtgrrnr + " has not yet been replicated"
                             });
@@ -77,15 +103,13 @@ sap.ui.define([
                     });
 
                     // Sort by TCR number
-                    aResults.sort(function (a, b) {
+                    aFiltered.sort(function (a, b) {
                         return Number(a.SourceNumber) - Number(b.SourceNumber);
                     });
 
-                    // Show results in table dialog
-                    this._showResultDialog(aResults);
+                    this._showResultDialog(aFiltered);
 
                 }.bind(this),
-
                 error: function () {
                     MessageToast.show("Error fetching logs");
                 }
