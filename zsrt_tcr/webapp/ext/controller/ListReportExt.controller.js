@@ -18,100 +18,137 @@ sap.ui.define([
                 return;
             }
 
-            // Keep only one entry per TCR number in case of multiple selected rows for the same TCR
+            // Get unique TCR numbers from selected contexts
             const mUnique = {};
             aContexts.forEach(function (oContext) {
-                const oData = oContext.getObject();
-                mUnique[oData.vtgrrnr] = oData;
+                const oObj = oContext.getObject();
+                mUnique[oObj.vtgrrnr] = oObj;
             });
 
-            const aSelectedData = Object.values(mUnique);
+            const aUniqueContextObjects = Object.values(mUnique);
 
-            // Map TCR number to Processing ID
-            const mapTcrToPid = {};
-            aSelectedData.forEach(function (o) {
-                mapTcrToPid[String(o.vtgrrnr).padStart(20, "0")] = String(o.processingID);
+            // Collect unique TCR numbers
+            const aSelectedTCRs = aUniqueContextObjects.map(function (oObj) {
+                return String(oObj.vtgrrnr).padStart(20, "0");
             });
 
-            // Sort by TCR number
-            aSelectedData.sort(function (a, b) {
-                return Number(a.vtgrrnr) - Number(b.vtgrrnr);
-            });
-
-            // Build SourceNumber ranges
-            const aRanges = [];
-            let nStart = null, nPrev = null;
-
-            aSelectedData.forEach(function (oData) {
-                const nCurrent = Number(oData.vtgrrnr);
-                if (nStart === null) {
-                    nStart = nCurrent;
-                    nPrev = nCurrent;
-                    return;
+            // Collect unique non-empty ProcessingIds
+            const aProcessingIds = [];
+            aUniqueContextObjects.forEach(function (oObj) {
+                const sPid = oObj.processingID;
+                if (sPid && sPid.trim() !== "" && !aProcessingIds.includes(sPid)) {
+                    aProcessingIds.push(sPid);
                 }
-                if (nCurrent === nPrev + 1) {
-                    nPrev = nCurrent;
-                    return;
-                }
-                aRanges.push({ from: nStart, to: nPrev });
-                nStart = nCurrent;
-                nPrev = nCurrent;
             });
-            if (nStart !== null) {
-                aRanges.push({ from: nStart, to: nPrev });
+
+            // If all the selected rows have empty ProcessingId, we will show a message "not yet been replicated"
+            if (!aProcessingIds.length) {
+                const aFallback = [];
+                aUniqueContextObjects.forEach(function (oObj) {
+                    const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
+                    if (!aFallback.some(function (o) { return o.SourceNumber === sTcr; })) {
+                        aFallback.push({
+                            SourceNumber: sTcr,
+                            ObjectType: "TCR",
+                            Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
+                        });
+                    }
+                });
+                this._showResultDialog(aFallback);
+                return;
             }
 
-            // Build OData filters on Source TCR Number only
-            const aFilters = aRanges.map(function (oRange) {
-                const sFrom = String(oRange.from).padStart(20, "0");
-                const sTo = String(oRange.to).padStart(20, "0");
-
-                return oRange.from === oRange.to
-                    ? new sap.ui.model.Filter("SourceNumber", sap.ui.model.FilterOperator.EQ, sFrom)
-                    : new sap.ui.model.Filter("SourceNumber", sap.ui.model.FilterOperator.BT, sFrom, sTo);
+            // Build filter for ProcessingId
+            const aPidFilters = aProcessingIds.map(function (sPid) {
+                return new sap.ui.model.Filter("ProcessingId", sap.ui.model.FilterOperator.EQ, sPid);
             });
+            const oFinalFilter = new sap.ui.model.Filter({ filters: aPidFilters, and: false });
 
-            const oFilter = new sap.ui.model.Filter({ filters: aFilters, and: false });
+            // Build filter for TCR number that will be useful for TCRMapping
+            const aTCRFilters = aSelectedTCRs.map(function (sTCR) {
+                return new sap.ui.model.Filter("Vtgrrnr", sap.ui.model.FilterOperator.EQ, sTCR);
+            });
+            const oTCRFilter = new sap.ui.model.Filter({ filters: aTCRFilters, and: false });
 
             const oModel = this.getView().getModel();
             oModel.read("/ProcessLog", {
-                filters: [oFilter],
+                filters: [oFinalFilter],
                 success: function (oData) {
                     const aResults = oData.results || [];
 
-                    // Now keep only rows where ProcessingId matches the paired TCR
-                    const aFiltered = aResults.filter(function (oResult) {
-                        const sExpectedPid = mapTcrToPid[oResult.SourceNumber];
-                        return sExpectedPid !== undefined
-                            && String(oResult.ProcessingId) === sExpectedPid;
-                    });
+                    // Fetch the TCR data for the selected TCRs using TCRMapping entityset
+                    oModel.read("/TCRMapping", {
+                        filters: [oTCRFilter],
+                        success: function (oTCRData) {
+                            const aMappings = oTCRData.results || [];
 
-                    // Add "not replicated" for TCRs with no log entry
-                    aSelectedData.forEach(function (oSelected) {
-                        const sPadded = String(oSelected.vtgrrnr).padStart(20, "0");
-                        const bFound = aFiltered.some(function (oResult) {
-                            return oResult.SourceNumber === sPadded;
-                        });
-
-                        if (!bFound) {
-                            aFiltered.push({
-                                SourceNumber: sPadded,
-                                ObjectType: "TCR",
-                                Message: "TCR " + oSelected.vtgrrnr + " has not yet been replicated"
+                            // Build a map from ProcessingId -> TCR number for easy lookup
+                            const mapPidToTcr = {};
+                            aUniqueContextObjects.forEach(function (oObj) {
+                                if (oObj.processingID && oObj.processingID.trim() !== "") {
+                                    mapPidToTcr[String(oObj.processingID)] = String(oObj.vtgrrnr).padStart(20, "0");
+                                }
                             });
+
+                            // Filter logs based on ObjectType and mapping
+                            const aFinalResults = aResults.filter(function (oLog) {
+                                if (oLog.ObjectType === "TCR") {
+                                    return aSelectedTCRs.includes(oLog.SourceNumber);
+                                }
+                                if (oLog.ObjectType === "TREATY") {
+                                    return aMappings.some(function (oMap) {
+                                        return oMap.Fldname === "VTGNR" && oMap.Low === oLog.SourceNumber;
+                                    });
+                                }
+                                if (oLog.ObjectType === "BP") {
+                                    return aMappings.some(function (oMap) {
+                                        return ["GESNR", "VERANTW_GESNR", "ZE_GESNR"].includes(oMap.Fldname)
+                                            && oMap.Low === oLog.SourceNumber;
+                                    });
+                                }
+                                return false;
+                            }).map(function (oLog) {
+                                // Attach the parent TCR number to each log entry
+                                return Object.assign({}, oLog, {
+                                    TCRNumber: mapPidToTcr[String(oLog.ProcessingId)] || ""
+                                });
+                            });
+
+                            // Add "not replicated" for TCRs with no ProcessingId
+                            aUniqueContextObjects.forEach(function (oObj) {
+                                const sPid = oObj.processingID;
+                                if (!sPid || sPid.trim() === "") {
+                                    const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
+                                    if (!aFinalResults.some(function (o) { return o.SourceNumber === sTcr; })) {
+                                        aFinalResults.push({
+                                            TCRNumber: String(oObj.vtgrrnr).padStart(20, "0"),
+                                            ObjectType: "TCR",
+                                            Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
+                                        });
+                                    }
+                                }
+                            });
+
+                            if (!aFinalResults.length) {
+                                MessageToast.show("No log entries found");
+                                return;
+                            }
+
+                            // Sort by TCR number
+                            aFinalResults.sort(function (a, b) {
+                                return Number(a.TCRNumber) - Number(b.TCRNumber);
+                            });
+
+                            this._showResultDialog(aFinalResults);
+
+                        }.bind(this),
+                        error: function () {
+                            MessageToast.show("Error fetching TCR mapping");
                         }
                     });
-
-                    // Sort by TCR number
-                    aFiltered.sort(function (a, b) {
-                        return Number(a.SourceNumber) - Number(b.SourceNumber);
-                    });
-
-                    this._showResultDialog(aFiltered);
-
                 }.bind(this),
                 error: function () {
-                    MessageToast.show("Error fetching logs");
+                    MessageToast.show("Error fetching process logs");
                 }
             });
         },
@@ -144,7 +181,7 @@ sap.ui.define([
                 path: "/results",
                 template: new sap.m.ColumnListItem({
                     cells: [
-                        new sap.m.Text({ text: "{SourceNumber}" }),
+                        new sap.m.Text({ text: "{TCRNumber}" }),
                         new sap.m.Text({ text: "{ObjectType}" }),
                         new sap.m.Text({ text: "{SourceNumber}" }),
                         new sap.m.Text({ text: "{ProcessingId}" }),
@@ -197,13 +234,13 @@ sap.ui.define([
             }
 
             const aCols = [
-                { label: "TCR", property: "SourceNumber" },
-                { label: "Process ID", property: "ProcessingId" },
+                { label: "TCR Number", property: "TCRNumber" },
+                { label: "Process Ref ID", property: "ProcessingId" },
                 { label: "Object Type", property: "ObjectType" },
-                { label: "Source Number", property: "SourceNumber" },
+                { label: "Source Object Number", property: "SourceNumber" },
                 { label: "Message Type", property: "Type" },
                 { label: "Message", property: "Message" },
-                { label: "Created TCR", property: "TargetNumber" },
+                { label: "Target Object Number", property: "TargetNumber" },
                 { label: "System", property: "Systemm" }
             ];
 
