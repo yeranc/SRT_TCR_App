@@ -1,8 +1,9 @@
 sap.ui.define([
     "sap/m/MessageToast",
     "sap/ui/export/Spreadsheet",
-    "sap/ui/model/json/JSONModel"
-], function (MessageToast, Spreadsheet, JSONModel) {
+    "sap/ui/model/json/JSONModel",
+    "sap/ui/core/BusyIndicator"
+], function (MessageToast, Spreadsheet, JSONModel, BusyIndicator) {
     "use strict";
 
     return {
@@ -17,6 +18,9 @@ sap.ui.define([
                 MessageToast.show("No rows selected");
                 return;
             }
+
+            // Show busy indicator
+            BusyIndicator.show(0);
 
             // Get unique TCR numbers from selected contexts
             const mUnique = {};
@@ -54,6 +58,7 @@ sap.ui.define([
                         });
                     }
                 });
+                BusyIndicator.hide();
                 this._showResultDialog(aFallback);
                 return;
             }
@@ -130,6 +135,7 @@ sap.ui.define([
                             });
 
                             if (!aFinalResults.length) {
+                                BusyIndicator.hide();
                                 MessageToast.show("No log entries found");
                                 return;
                             }
@@ -139,15 +145,18 @@ sap.ui.define([
                                 return Number(a.TCRNumber) - Number(b.TCRNumber);
                             });
 
+                            BusyIndicator.hide();
                             this._showResultDialog(aFinalResults);
 
                         }.bind(this),
                         error: function () {
+                            BusyIndicator.hide();
                             MessageToast.show("Error fetching TCR mapping");
                         }
                     });
                 }.bind(this),
                 error: function () {
+                    BusyIndicator.hide();
                     MessageToast.show("Error fetching process logs");
                 }
             });
