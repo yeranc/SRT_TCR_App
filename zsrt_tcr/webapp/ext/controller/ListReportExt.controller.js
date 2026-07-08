@@ -69,10 +69,8 @@ sap.ui.define([
             });
             const oFinalFilter = new sap.ui.model.Filter({ filters: aPidFilters, and: false });
 
-            // Build filter for TCR number that will be useful for TCRMapping
-            const aTCRFilters = aSelectedTCRs.map(function (sTCR) {
-                return new sap.ui.model.Filter("Vtgrrnr", sap.ui.model.FilterOperator.EQ, sTCR);
-            });
+            // Build range-based filter for TCR number (collapses consecutive numbers into BETWEEN ranges)
+            const aTCRFilters = this._buildRangeFilters(aSelectedTCRs, "Vtgrrnr");
             const oTCRFilter = new sap.ui.model.Filter({ filters: aTCRFilters, and: false });
 
             const oModel = this.getView().getModel();
@@ -163,6 +161,51 @@ sap.ui.define([
         },
 
         /*
+        /* Method _buildRangeFilters
+        /* Convert a list of (padded) numeric strings into contiguous range filters.
+        /* e.g. [1,2,3,5,6,9] -> BT(1,3), BT(5,6), EQ(9)
+        */
+        _buildRangeFilters: function (aValues, sFieldName) {
+            if (!aValues || !aValues.length) {
+                return [];
+            }
+
+            // Sort numerically
+            const aSorted = aValues.slice().sort(function (a, b) {
+                return Number(a) - Number(b);
+            });
+
+            // Remove if any duplicates (e.g. if user selected same TCR multiple times)
+            const aUnique = aSorted.filter(function (sVal, i) {
+                return i === 0 || Number(sVal) !== Number(aSorted[i - 1]);
+            });
+
+            // Group into contiguous ranges
+            const aRanges = [];
+            let sStart = aUnique[0];
+            let sPrev = aUnique[0];
+
+            for (let i = 1; i < aUnique.length; i++) {
+                const sCurrent = aUnique[i];
+                if (Number(sCurrent) === Number(sPrev) + 1) {
+                    sPrev = sCurrent; // still contiguous, extend
+                } else {
+                    aRanges.push({ start: sStart, end: sPrev }); // break found, close range
+                    sStart = sCurrent;
+                    sPrev = sCurrent;
+                }
+            }
+            aRanges.push({ start: sStart, end: sPrev }); // push last range
+
+            // Build filters: single value -> EQ, range -> BT
+            return aRanges.map(function (oRange) {
+                return oRange.start === oRange.end
+                    ? new sap.ui.model.Filter(sFieldName, sap.ui.model.FilterOperator.EQ, oRange.start)
+                    : new sap.ui.model.Filter(sFieldName, sap.ui.model.FilterOperator.BT, oRange.start, oRange.end);
+            });
+        },
+
+        /*
         /* Method _showResultDialog
         /* Display logs in a dialog table
         */
@@ -171,7 +214,7 @@ sap.ui.define([
 
             const oTable = new sap.m.Table({
                 growing: true,
-                growingThreshold: 50,
+                growingThreshold: 100,
                 columns: [
                     new sap.m.Column({ header: new sap.m.Text({ text: "TCR Number" }) }),
                     new sap.m.Column({ header: new sap.m.Text({ text: "Object Type" }) }),
