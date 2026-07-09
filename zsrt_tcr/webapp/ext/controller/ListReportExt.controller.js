@@ -74,77 +74,119 @@ sap.ui.define([
             const oTCRFilter = new sap.ui.model.Filter({ filters: aTCRFilters, and: false });
 
             const oModel = this.getView().getModel();
+            // 1. Fetch all the data for the selected ProcessingIds from ProcessLog entityset
             oModel.read("/ProcessLog", {
                 filters: [oFinalFilter],
                 success: function (oData) {
                     const aResults = oData.results || [];
 
-                    // Fetch the TCR data for the selected TCRs using TCRMapping entityset
+                    // 2. Fetch the TCR data for the selected TCRs using TCRMapping entityset
                     oModel.read("/TCRMapping", {
                         filters: [oTCRFilter],
                         success: function (oTCRData) {
                             const aMappings = oTCRData.results || [];
 
-                            // Build a map from ProcessingId -> TCR number for easy lookup
-                            const mapPidToTcr = {};
-                            aUniqueContextObjects.forEach(function (oObj) {
-                                if (oObj.processingID && oObj.processingID.trim() !== "") {
-                                    mapPidToTcr[String(oObj.processingID)] = String(oObj.vtgrrnr).padStart(20, "0");
-                                }
-                            });
-
-                            // Filter logs based on ObjectType and mapping
-                            const aFinalResults = aResults.filter(function (oLog) {
-                                if (oLog.ObjectType === "TCR") {
-                                    return aSelectedTCRs.includes(oLog.SourceNumber);
-                                }
-                                if (oLog.ObjectType === "TREATY") {
-                                    return aMappings.some(function (oMap) {
-                                        return oMap.Fldname === "VTGNR" && oMap.Low === oLog.SourceNumber;
-                                    });
-                                }
-                                if (oLog.ObjectType === "BP") {
-                                    return aMappings.some(function (oMap) {
-                                        return ["GESNR", "VERANTW_GESNR", "ZE_GESNR"].includes(oMap.Fldname)
-                                            && oMap.Low === oLog.SourceNumber;
-                                    });
-                                }
-                                return false;
-                            }).map(function (oLog) {
-                                // Attach the parent TCR number to each log entry
-                                return Object.assign({}, oLog, {
-                                    TCRNumber: mapPidToTcr[String(oLog.ProcessingId)] || ""
+                            // 3. Fetch the Account data for the Treaty numbers linked to the selected TCRs
+                            // Get treaty numbers
+                            const aTreaties = aMappings.filter(function (o) {
+                                return o.Fldname === "VTGNR";
+                            })
+                                .map(function (o) {
+                                    return o.Low;
                                 });
+
+                            // Build range-based filter for Treaty numbers
+                            const aTreatyFilters = aTreaties.map(function (sTreaty) {
+                                return new sap.ui.model.Filter(
+                                    "Vtgnr",
+                                    sap.ui.model.FilterOperator.EQ,
+                                    sTreaty
+                                );
+                            });
+                            const oTreatyFilter = new sap.ui.model.Filter({
+                                filters: aTreatyFilters,
+                                and: false
                             });
 
-                            // Add "not replicated" for TCRs with no ProcessingId
-                            aUniqueContextObjects.forEach(function (oObj) {
-                                const sPid = oObj.processingID;
-                                if (!sPid || sPid.trim() === "") {
-                                    const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
-                                    if (!aFinalResults.some(function (o) { return o.SourceNumber === sTcr; })) {
-                                        aFinalResults.push({
-                                            TCRNumber: String(oObj.vtgrrnr).padStart(20, "0"),
-                                            ObjectType: "TCR",
-                                            Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
+                            // Now call the AccountMapping entityset
+                            oModel.read("/AccountsMapping", {
+                                filters: [oTreatyFilter],
+
+                                success: function (oAccountData) {
+                                    const aAccounts = oAccountData.results.map(function (o) {
+                                        return String(o.Abrnr).padStart(20, "0");
+                                    });
+
+                                    // Build a map from ProcessingId -> TCR number for easy lookup
+                                    const mapPidToTcr = {};
+                                    aUniqueContextObjects.forEach(function (oObj) {
+                                        if (oObj.processingID && oObj.processingID.trim() !== "") {
+                                            mapPidToTcr[String(oObj.processingID)] = String(oObj.vtgrrnr).padStart(20, "0");
+                                        }
+                                    });
+
+                                    // Filter logs based on ObjectType and mapping
+                                    const aFinalResults = aResults.filter(function (oLog) {
+                                        if (oLog.ObjectType === "TCR") {
+                                            return aSelectedTCRs.includes(oLog.SourceNumber);
+                                        }
+                                        if (oLog.ObjectType === "TREATY") {
+                                            return aMappings.some(function (oMap) {
+                                                return oMap.Fldname === "VTGNR" && oMap.Low === oLog.SourceNumber;
+                                            });
+                                        }
+                                        if (oLog.ObjectType === "BP") {
+                                            return aMappings.some(function (oMap) {
+                                                return ["GESNR", "VERANTW_GESNR", "ZE_GESNR"].includes(oMap.Fldname)
+                                                    && oMap.Low === oLog.SourceNumber;
+                                            });
+                                        }
+                                        if (oLog.ObjectType === "ACCOUNT") {
+                                            return aAccounts.includes(oLog.SourceNumber);
+                                        }
+                                        return false;
+                                    }).map(function (oLog) {
+                                        // Attach the parent TCR number to each log entry
+                                        return Object.assign({}, oLog, {
+                                            TCRNumber: mapPidToTcr[String(oLog.ProcessingId)] || ""
                                         });
+                                    });
+
+                                    // Add "not replicated" for TCRs with no ProcessingId
+                                    aUniqueContextObjects.forEach(function (oObj) {
+                                        const sPid = oObj.processingID;
+                                        if (!sPid || sPid.trim() === "") {
+                                            const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
+                                            if (!aFinalResults.some(function (o) { return o.SourceNumber === sTcr; })) {
+                                                aFinalResults.push({
+                                                    TCRNumber: String(oObj.vtgrrnr).padStart(20, "0"),
+                                                    ObjectType: "TCR",
+                                                    Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
+                                                });
+                                            }
+                                        }
+                                    });
+
+                                    if (!aFinalResults.length) {
+                                        BusyIndicator.hide();
+                                        MessageToast.show("No log entries found");
+                                        return;
                                     }
+
+                                    // Sort by TCR number
+                                    aFinalResults.sort(function (a, b) {
+                                        return Number(a.TCRNumber) - Number(b.TCRNumber);
+                                    });
+
+                                    BusyIndicator.hide();
+                                    this._showResultDialog(aFinalResults);
+
+                                }.bind(this),
+                                error: function () {
+                                    BusyIndicator.hide();
+                                    MessageToast.show("Error fetching Accounts");
                                 }
                             });
-
-                            if (!aFinalResults.length) {
-                                BusyIndicator.hide();
-                                MessageToast.show("No log entries found");
-                                return;
-                            }
-
-                            // Sort by TCR number
-                            aFinalResults.sort(function (a, b) {
-                                return Number(a.TCRNumber) - Number(b.TCRNumber);
-                            });
-
-                            BusyIndicator.hide();
-                            this._showResultDialog(aFinalResults);
 
                         }.bind(this),
                         error: function () {
