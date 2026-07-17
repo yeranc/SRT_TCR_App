@@ -117,69 +117,89 @@ sap.ui.define([
                                         return String(o.Abrnr).padStart(20, "0");
                                     });
 
-                                    // Build a map from ProcessingId -> TCR number for easy lookup
-                                    const mapPidToTcr = {};
-                                    aUniqueContextObjects.forEach(function (oObj) {
-                                        if (oObj.processingID && oObj.processingID.trim() !== "") {
-                                            mapPidToTcr[String(oObj.processingID)] = String(oObj.vtgrrnr).padStart(20, "0");
-                                        }
-                                    });
+                                    // 4. Fetch the Loss data for the Treaty numbers linked to the selected TCRs
+                                    oModel.read("/LossMapping", {
+                                        filters: [oTreatyFilter],
 
-                                    // Filter logs based on ObjectType and mapping
-                                    const aFinalResults = aResults.filter(function (oLog) {
-                                        if (oLog.ObjectType === "TCR") {
-                                            return aSelectedTCRs.includes(oLog.SourceNumber);
-                                        }
-                                        if (oLog.ObjectType === "TREATY") {
-                                            return aMappings.some(function (oMap) {
-                                                return oMap.Fldname === "VTGNR" && oMap.Low === oLog.SourceNumber;
+                                        success: function (oLossData) {
+                                            const aLosses = oLossData.results.map(function (o) {
+                                                return String(o.Schadnr).padStart(10, "0");
                                             });
-                                        }
-                                        if (oLog.ObjectType === "BP") {
-                                            return aMappings.some(function (oMap) {
-                                                return ["GESNR", "VERANTW_GESNR", "ZE_GESNR"].includes(oMap.Fldname)
-                                                    && oMap.Low === oLog.SourceNumber;
-                                            });
-                                        }
-                                        if (oLog.ObjectType === "ACCOUNT") {
-                                            return aAccounts.includes(oLog.SourceNumber);
-                                        }
-                                        return false;
-                                    }).map(function (oLog) {
-                                        // Attach the parent TCR number to each log entry
-                                        return Object.assign({}, oLog, {
-                                            TCRNumber: mapPidToTcr[String(oLog.ProcessingId)] || ""
-                                        });
-                                    });
 
-                                    // Add "not replicated" for TCRs with no ProcessingId
-                                    aUniqueContextObjects.forEach(function (oObj) {
-                                        const sPid = oObj.processingID;
-                                        if (!sPid || sPid.trim() === "") {
-                                            const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
-                                            if (!aFinalResults.some(function (o) { return o.SourceNumber === sTcr; })) {
-                                                aFinalResults.push({
-                                                    TCRNumber: String(oObj.vtgrrnr).padStart(20, "0"),
-                                                    ObjectType: "TCR",
-                                                    Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
+                                            // Build a map from ProcessingId -> TCR number for easy lookup
+                                            const mapPidToTcr = {};
+                                            aUniqueContextObjects.forEach(function (oObj) {
+                                                if (oObj.processingID && oObj.processingID.trim() !== "") {
+                                                    mapPidToTcr[String(oObj.processingID)] = String(oObj.vtgrrnr).padStart(20, "0");
+                                                }
+                                            });
+
+                                            // Filter logs based on ObjectType and mapping
+                                            const aFinalResults = aResults.filter(function (oLog) {
+                                                if (oLog.ObjectType === "TCR") {
+                                                    return aSelectedTCRs.includes(oLog.SourceNumber);
+                                                }
+                                                if (oLog.ObjectType === "TREATY") {
+                                                    return aMappings.some(function (oMap) {
+                                                        return oMap.Fldname === "VTGNR" && oMap.Low === oLog.SourceNumber;
+                                                    });
+                                                }
+                                                if (oLog.ObjectType === "BP") {
+                                                    return aMappings.some(function (oMap) {
+                                                        return ["GESNR", "VERANTW_GESNR", "ZE_GESNR"].includes(oMap.Fldname)
+                                                            && oMap.Low === oLog.SourceNumber;
+                                                    });
+                                                }
+                                                if (oLog.ObjectType === "ACCOUNT") {
+                                                    return aAccounts.includes(oLog.SourceNumber);
+                                                }
+                                                if (oLog.ObjectType === "LOSS") {
+                                                    return aLosses.includes(oLog.SourceNumber);
+                                                }
+                                                return false;
+                                            }).map(function (oLog) {
+                                                // Attach the parent TCR number to each log entry
+                                                return Object.assign({}, oLog, {
+                                                    TCRNumber: mapPidToTcr[String(oLog.ProcessingId)] || ""
                                                 });
+                                            });
+
+                                            // Add "not replicated" for TCRs with no ProcessingId
+                                            aUniqueContextObjects.forEach(function (oObj) {
+                                                const sPid = oObj.processingID;
+                                                if (!sPid || sPid.trim() === "") {
+                                                    const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
+                                                    if (!aFinalResults.some(function (o) { return o.SourceNumber === sTcr; })) {
+                                                        aFinalResults.push({
+                                                            TCRNumber: String(oObj.vtgrrnr).padStart(20, "0"),
+                                                            ObjectType: "TCR",
+                                                            Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
+                                                        });
+                                                    }
+                                                }
+                                            });
+
+                                            if (!aFinalResults.length) {
+                                                BusyIndicator.hide();
+                                                MessageToast.show("No log entries found");
+                                                return;
                                             }
+
+                                            // Sort by TCR number
+                                            aFinalResults.sort(function (a, b) {
+                                                return Number(a.TCRNumber) - Number(b.TCRNumber);
+                                            });
+
+                                            BusyIndicator.hide();
+                                            this._showResultDialog(aFinalResults);
+                                        }.bind(this),
+
+                                        error: function () {
+                                            BusyIndicator.hide();
+                                            MessageToast.show("Error fetching Loss Mapping");
                                         }
+
                                     });
-
-                                    if (!aFinalResults.length) {
-                                        BusyIndicator.hide();
-                                        MessageToast.show("No log entries found");
-                                        return;
-                                    }
-
-                                    // Sort by TCR number
-                                    aFinalResults.sort(function (a, b) {
-                                        return Number(a.TCRNumber) - Number(b.TCRNumber);
-                                    });
-
-                                    BusyIndicator.hide();
-                                    this._showResultDialog(aFinalResults);
 
                                 }.bind(this),
                                 error: function () {
