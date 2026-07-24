@@ -19,207 +19,99 @@ sap.ui.define([
                 return;
             }
 
-            // Show busy indicator
-            BusyIndicator.show(0);
-
             // Get unique TCR numbers from selected contexts
             const mUnique = {};
             aContexts.forEach(function (oContext) {
                 const oObj = oContext.getObject();
                 mUnique[oObj.vtgrrnr] = oObj;
             });
-
             const aUniqueContextObjects = Object.values(mUnique);
 
-            // Collect unique TCR numbers
-            const aSelectedTCRs = aUniqueContextObjects.map(function (oObj) {
-                return String(oObj.vtgrrnr).padStart(20, "0");
-            });
-
-            // Collect unique non-empty ProcessingIds
-            const aProcessingIds = [];
+            // Split selected TCRs into two groups:
+            // - Replicated: has a ProcessingId, so real log data exists in the backend
+            // - Not Replicated: no ProcessingId yet, nothing to fetch for these
+            const aReplicated = [];
+            const aNotReplicated = [];
             aUniqueContextObjects.forEach(function (oObj) {
                 const sPid = oObj.processingID;
-                if (sPid && sPid.trim() !== "" && !aProcessingIds.includes(sPid)) {
+                if (sPid && sPid.trim() !== "") {
+                    aReplicated.push(oObj);
+                } else {
+                    aNotReplicated.push(oObj);
+                }
+            });
+
+            // Fallback rows for TCRs that haven't been replicated yet (client-side, shown separately)
+            const aFallbackRows = aNotReplicated.map(function (oObj) {
+                const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
+                return {
+                    TCRNumber: sTcr,
+                    ObjectType: "TCR",
+                    SourceNumber: sTcr,
+                    ProcessingId: "",
+                    TargetNumber: "",
+                    Systemm: "",
+                    Type: "",
+                    Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
+                };
+            });
+
+            if (!aReplicated.length) {
+                this._oLastFilter = null;
+                this._aLastSorters = null;
+                this._aLastFallbackRows = aFallbackRows;
+                this._showResultDialog(null, null, aFallbackRows);
+                return;
+            }
+
+            // Collect unique ProcessingIds
+            const aProcessingIds = [];
+            aReplicated.forEach(function (oObj) {
+                const sPid = oObj.processingID;
+                if (!aProcessingIds.includes(sPid)) {
                     aProcessingIds.push(sPid);
                 }
             });
 
-            // If all the selected rows have empty ProcessingId, we will show a message "not yet been replicated"
-            if (!aProcessingIds.length) {
-                const aFallback = [];
-                aUniqueContextObjects.forEach(function (oObj) {
-                    const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
-                    if (!aFallback.some(function (o) { return o.SourceNumber === sTcr; })) {
-                        aFallback.push({
-                            SourceNumber: sTcr,
-                            ObjectType: "TCR",
-                            Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
-                        });
-                    }
-                });
-                BusyIndicator.hide();
-                this._showResultDialog(aFallback);
-                return;
-            }
+            // Collect unique TCR numbers
+            const aSelectedTCRs = aReplicated.map(function (oObj) {
+                return String(oObj.vtgrrnr).padStart(20, "0");
+            });
 
-            // Build filter for ProcessingId
+            // Build filters for processing id and selected TCRs
             const aPidFilters = aProcessingIds.map(function (sPid) {
                 return new sap.ui.model.Filter("ProcessingId", sap.ui.model.FilterOperator.EQ, sPid);
             });
-            const oFinalFilter = new sap.ui.model.Filter({ filters: aPidFilters, and: false });
+            const oPidFilter = new sap.ui.model.Filter({ filters: aPidFilters, and: false });
 
-            // Build range-based filter for TCR number (collapses consecutive numbers into BETWEEN ranges)
-            const aTCRFilters = this._buildRangeFilters(aSelectedTCRs, "Vtgrrnr");
+            const aTCRFilters = this._buildRangeFilters(aSelectedTCRs, "ParentTCR");
             const oTCRFilter = new sap.ui.model.Filter({ filters: aTCRFilters, and: false });
 
-            const oModel = this.getView().getModel();
-            // 1. Fetch all the data for the selected ProcessingIds from ProcessLog entityset
-            oModel.read("/ProcessLog", {
-                filters: [oFinalFilter],
-                success: function (oData) {
-                    const aResults = oData.results || [];
-
-                    // 2. Fetch the TCR data for the selected TCRs using TCRMapping entityset
-                    oModel.read("/TCRMapping", {
-                        filters: [oTCRFilter],
-                        success: function (oTCRData) {
-                            const aMappings = oTCRData.results || [];
-
-                            // 3. Fetch the Account data for the Treaty numbers linked to the selected TCRs
-                            // Get treaty numbers
-                            const aTreaties = aMappings.filter(function (o) {
-                                return o.Fldname === "VTGNR";
-                            })
-                                .map(function (o) {
-                                    return o.Low;
-                                });
-
-                            // Build range-based filter for Treaty numbers
-                            const aTreatyFilters = aTreaties.map(function (sTreaty) {
-                                return new sap.ui.model.Filter(
-                                    "Vtgnr",
-                                    sap.ui.model.FilterOperator.EQ,
-                                    sTreaty
-                                );
-                            });
-                            const oTreatyFilter = new sap.ui.model.Filter({
-                                filters: aTreatyFilters,
-                                and: false
-                            });
-
-                            // Now call the AccountMapping entityset
-                            oModel.read("/AccountsMapping", {
-                                filters: [oTreatyFilter],
-
-                                success: function (oAccountData) {
-                                    const aAccounts = oAccountData.results.map(function (o) {
-                                        return String(o.Abrnr).padStart(20, "0");
-                                    });
-
-                                    // 4. Fetch the Loss data for the Treaty numbers linked to the selected TCRs
-                                    oModel.read("/LossMapping", {
-                                        filters: [oTreatyFilter],
-
-                                        success: function (oLossData) {
-                                            const aLosses = oLossData.results.map(function (o) {
-                                                return String(o.Schadnr).padStart(10, "0");
-                                            });
-
-                                            // Build a map from ProcessingId -> TCR number for easy lookup
-                                            const mapPidToTcr = {};
-                                            aUniqueContextObjects.forEach(function (oObj) {
-                                                if (oObj.processingID && oObj.processingID.trim() !== "") {
-                                                    mapPidToTcr[String(oObj.processingID)] = String(oObj.vtgrrnr).padStart(20, "0");
-                                                }
-                                            });
-
-                                            // Filter logs based on ObjectType and mapping
-                                            const aFinalResults = aResults.filter(function (oLog) {
-                                                if (oLog.ObjectType === "TCR") {
-                                                    return aSelectedTCRs.includes(oLog.SourceNumber);
-                                                }
-                                                if (oLog.ObjectType === "TREATY") {
-                                                    return aMappings.some(function (oMap) {
-                                                        return oMap.Fldname === "VTGNR" && oMap.Low === oLog.SourceNumber;
-                                                    });
-                                                }
-                                                if (oLog.ObjectType === "BP") {
-                                                    return aMappings.some(function (oMap) {
-                                                        return ["GESNR", "VERANTW_GESNR", "ZE_GESNR"].includes(oMap.Fldname)
-                                                            && oMap.Low === oLog.SourceNumber;
-                                                    });
-                                                }
-                                                if (oLog.ObjectType === "ACCOUNT") {
-                                                    return aAccounts.includes(oLog.SourceNumber);
-                                                }
-                                                if (oLog.ObjectType === "LOSS") {
-                                                    return aLosses.includes(oLog.SourceNumber);
-                                                }
-                                                return false;
-                                            }).map(function (oLog) {
-                                                // Attach the parent TCR number to each log entry
-                                                return Object.assign({}, oLog, {
-                                                    TCRNumber: mapPidToTcr[String(oLog.ProcessingId)] || ""
-                                                });
-                                            });
-
-                                            // Add "not replicated" for TCRs with no ProcessingId
-                                            aUniqueContextObjects.forEach(function (oObj) {
-                                                const sPid = oObj.processingID;
-                                                if (!sPid || sPid.trim() === "") {
-                                                    const sTcr = String(oObj.vtgrrnr).padStart(20, "0");
-                                                    if (!aFinalResults.some(function (o) { return o.SourceNumber === sTcr; })) {
-                                                        aFinalResults.push({
-                                                            TCRNumber: String(oObj.vtgrrnr).padStart(20, "0"),
-                                                            ObjectType: "TCR",
-                                                            Message: "TCR " + oObj.vtgrrnr + " has not yet been replicated"
-                                                        });
-                                                    }
-                                                }
-                                            });
-
-                                            if (!aFinalResults.length) {
-                                                BusyIndicator.hide();
-                                                MessageToast.show("No log entries found");
-                                                return;
-                                            }
-
-                                            // Sort by TCR number
-                                            aFinalResults.sort(function (a, b) {
-                                                return Number(a.TCRNumber) - Number(b.TCRNumber);
-                                            });
-
-                                            BusyIndicator.hide();
-                                            this._showResultDialog(aFinalResults);
-                                        }.bind(this),
-
-                                        error: function () {
-                                            BusyIndicator.hide();
-                                            MessageToast.show("Error fetching Loss Mapping");
-                                        }
-
-                                    });
-
-                                }.bind(this),
-                                error: function () {
-                                    BusyIndicator.hide();
-                                    MessageToast.show("Error fetching Accounts");
-                                }
-                            });
-
-                        }.bind(this),
-                        error: function () {
-                            BusyIndicator.hide();
-                            MessageToast.show("Error fetching TCR mapping");
-                        }
-                    });
-                }.bind(this),
-                error: function () {
-                    BusyIndicator.hide();
-                    MessageToast.show("Error fetching process logs");
-                }
+            const oCombinedFilter = new sap.ui.model.Filter({
+                filters: [oPidFilter, oTCRFilter],
+                and: true
             });
+
+            // Build a map from ProcessingId -> TCR number for the display formatter
+            const mapPidToTcr = {};
+            aReplicated.forEach(function (oObj) {
+                mapPidToTcr[String(oObj.processingID)] = String(oObj.vtgrrnr).padStart(20, "0");
+            });
+            this._mapPidToTcr = mapPidToTcr;
+
+            const aSorters = [
+                new sap.ui.model.Sorter("ParentTCR"),
+                new sap.ui.model.Sorter("ProcessingId"),
+                new sap.ui.model.Sorter("ObjectType"),
+                new sap.ui.model.Sorter("SourceNumber")
+            ];
+
+            // Keep these around so the Export button can re-fetch the full set on demand
+            this._oLastFilter = oCombinedFilter;
+            this._aLastSorters = aSorters;
+            this._aLastFallbackRows = aFallbackRows;
+
+            this._showResultDialog(oCombinedFilter, aSorters, aFallbackRows);
         },
 
         /*
@@ -250,14 +142,14 @@ sap.ui.define([
             for (let i = 1; i < aUnique.length; i++) {
                 const sCurrent = aUnique[i];
                 if (Number(sCurrent) === Number(sPrev) + 1) {
-                    sPrev = sCurrent; // still contiguous, extend
+                    sPrev = sCurrent;   // still contiguous, extend
                 } else {
-                    aRanges.push({ start: sStart, end: sPrev }); // break found, close range
+                    aRanges.push({ start: sStart, end: sPrev });    // break found, close range
                     sStart = sCurrent;
                     sPrev = sCurrent;
                 }
             }
-            aRanges.push({ start: sStart, end: sPrev }); // push last range
+            aRanges.push({ start: sStart, end: sPrev });
 
             // Build filters: single value -> EQ, range -> BT
             return aRanges.map(function (oRange) {
@@ -271,59 +163,140 @@ sap.ui.define([
         /* Method _showResultDialog
         /* Display logs in a dialog table
         */
-        _showResultDialog: function (aResults) {
-            const oJsonModel = new JSONModel({ results: aResults });
+        _showResultDialog: function (oFilter, aSorters, aFallbackRows) {
+            const that = this;
+            const oModel = this.getView().getModel();
 
-            const oTable = new sap.m.Table({
-                growing: true,
-                growingThreshold: 100,
-                columns: [
-                    new sap.m.Column({ header: new sap.m.Text({ text: "TCR Number" }) }),
-                    new sap.m.Column({ header: new sap.m.Text({ text: "Object Type" }) }),
-                    new sap.m.Column({ header: new sap.m.Text({ text: "Source Object Number" }) }),
-                    new sap.m.Column({ header: new sap.m.Text({ text: "Process Ref ID" }) }),
-                    new sap.m.Column({ header: new sap.m.Text({ text: "Target Object Number" }) }),
-                    new sap.m.Column({ header: new sap.m.Text({ text: "Target System" }) }),
-                    new sap.m.Column({ header: new sap.m.Text({ text: "Message Type" }) }),
-                    new sap.m.Column({ header: new sap.m.Text({ text: "Message" }) })
-                ]
-            });
+            const fnBuildColumns = function () {
+                return [
+                    new sap.m.Column({ width: "18%", header: new sap.m.Text({ text: "TCR Number" }) }),
+                    new sap.m.Column({ width: "10%", header: new sap.m.Text({ text: "Object Type" }) }),
+                    new sap.m.Column({ width: "18%", header: new sap.m.Text({ text: "Source Object Number" }) }),
+                    new sap.m.Column({ width: "18%", header: new sap.m.Text({ text: "Process Ref ID" }) }),
+                    new sap.m.Column({ width: "18%", header: new sap.m.Text({ text: "Target Object Number" }) }),
+                    new sap.m.Column({ width: "12%", header: new sap.m.Text({ text: "Target System" }) }),
+                    new sap.m.Column({ width: "8%", header: new sap.m.Text({ text: "Message Type" }), hAlign: "Center" }),
+                    new sap.m.Column({ width: "25%", header: new sap.m.Text({ text: "Message" }) })
+                ];
+            };
 
-            // Bind result data to table
-            oTable.setModel(oJsonModel);
-            oTable.bindItems({
-                path: "/results",
-                template: new sap.m.ColumnListItem({
-                    cells: [
-                        new sap.m.Text({ text: "{TCRNumber}" }),
-                        new sap.m.Text({ text: "{ObjectType}" }),
-                        new sap.m.Text({ text: "{SourceNumber}" }),
-                        new sap.m.Text({ text: "{ProcessingId}" }),
-                        new sap.m.Text({ text: "{TargetNumber}" }),
-                        new sap.m.Text({ text: "{Systemm}" }),
-                        new sap.m.Text({ text: "{Type}" }),
-                        new sap.m.Text({ text: "{Message}" })
-                    ]
-                })
-            });
+            const aDialogContent = [];
 
-            // Export button
+            // Panel 1: For TCRs data not yet replicated
+            if (aFallbackRows && aFallbackRows.length) {
+                const oFallbackModel = new JSONModel({ results: aFallbackRows });
+                const oFallbackTable = new sap.m.Table({
+                    columns: fnBuildColumns(),
+                    items: {
+                        path: "/results",
+                        template: new sap.m.ColumnListItem({
+                            cells: [
+                                new sap.m.Text({ text: "{TCRNumber}" }),
+                                new sap.m.Text({ text: "{ObjectType}" }),
+                                new sap.m.Text({ text: "{SourceNumber}" }),
+                                new sap.m.Text({ text: "{ProcessingId}" }),
+                                new sap.m.Text({ text: "{TargetNumber}" }),
+                                new sap.m.Text({ text: "{Systemm}" }),
+                                new sap.m.Text({ text: "{Type}" }),
+                                new sap.m.Text({ text: "{Message}" })
+                            ]
+                        })
+                    }
+                });
+                oFallbackTable.setModel(oFallbackModel);
+
+                const oFallbackPanel = new sap.m.Panel({
+                    expandable: true,
+                    expanded: true,
+                    headerToolbar: new sap.m.Toolbar({
+                        content: [
+                            new sap.ui.core.Icon({ src: "sap-icon://message-warning", color: "Critical" }).addStyleClass("sapUiTinyMarginEnd"),
+                            new sap.m.Title({ text: "TCRs Not Yet Replicated (" + aFallbackRows.length + ")", level: "H3" })
+                        ]
+                    }),
+                    content: [oFallbackTable]
+                }).addStyleClass("sapUiSmallMarginBottom");
+
+                aDialogContent.push(oFallbackPanel);
+            }
+
+            // Panel 2: For TCRs data that are replicated
+            let oMainTable = null;
+            let oMainPanel = null;
+            if (oFilter) {
+                oMainTable = new sap.m.Table({
+                    growing: true,
+                    growingThreshold: 100,       // page size per backend request
+                    growingScrollToLoad: true,   // fetch next page automatically on scroll
+                    noDataText: "No log entries found",
+                    columns: fnBuildColumns()
+                });
+                oMainTable.setBusyIndicatorDelay(0);
+                oMainTable.setBusy(true);
+
+                oMainTable.setModel(oModel);
+                oMainTable.bindItems({
+                    path: "/ProcessLog",
+                    filters: [oFilter],
+                    sorters: aSorters,
+                    parameters: {
+                        // ensures filtering/sorting/paging happens on the backend, not client-side
+                        operationMode: "Server"
+                    },
+                    template: new sap.m.ColumnListItem({
+                        cells: [
+                            new sap.m.Text({
+                                text: {
+                                    parts: [{ path: "ParentTCR" }, { path: "ProcessingId" }],
+                                    formatter: function (sParentTCR, sProcessingId) {
+                                        if (sParentTCR) {
+                                            return sParentTCR;
+                                        }
+                                        return (that._mapPidToTcr && that._mapPidToTcr[String(sProcessingId)]) || "";
+                                    }
+                                }
+                            }),
+                            new sap.m.Text({ text: "{ObjectType}" }),
+                            new sap.m.Text({ text: "{SourceNumber}" }),
+                            new sap.m.Text({ text: "{ProcessingId}" }),
+                            new sap.m.Text({ text: "{TargetNumber}" }),
+                            new sap.m.Text({ text: "{Systemm}" }),
+                            new sap.m.Text({ text: "{Type}" }),
+                            new sap.m.Text({ text: "{Message}" })
+                        ]
+                    })
+                });
+
+                oMainPanel = new sap.m.Panel({
+                    expandable: true,
+                    expanded: true,
+                    headerToolbar: new sap.m.Toolbar({
+                        content: [
+                            new sap.ui.core.Icon({ src: "sap-icon://accept", color: "Positive" }).addStyleClass("sapUiTinyMarginEnd"),
+                            new sap.m.Title({ text: "TCRs Replicated", level: "H3" })
+                        ]
+                    }),
+                    content: [oMainTable]
+                });
+
+                aDialogContent.push(oMainPanel);
+            }
+
             const oExportButton = new sap.m.Button({
                 text: "Export",
                 type: "Emphasized",
                 press: function () {
-                    this._exportToExcel(aResults);
-                }.bind(this)
+                    that._exportToExcel();
+                }
             });
 
-            // Results dialog
             const oDialog = new sap.m.Dialog({
                 title: "TCR Copy Logs",
                 contentWidth: "90%",
                 contentHeight: "80%",
                 resizable: true,
                 draggable: true,
-                content: [oTable],
+                content: aDialogContent,
                 buttons: [
                     oExportButton,
                     new sap.m.Button({
@@ -338,39 +311,118 @@ sap.ui.define([
                 }
             });
 
-            oDialog.open();
+            if (oMainTable) {
+                BusyIndicator.show(0);
+                oMainTable.getBinding("items").attachEventOnce("dataReceived", function () {
+                    BusyIndicator.hide();
+                    oMainTable.setBusy(false);
+                    oDialog.open();    // Open the dialog
+                });
+            } else {
+                oDialog.open();
+            }
         },
 
-        _exportToExcel: function (aData) {
-            if (!aData || !aData.length) {
-                MessageToast.show("No records to export");
+        /*
+        /* Method _exportToExcel
+        /* Export data to excel i.e., 5000 each time
+        */
+        _exportToExcel: function () {
+            const that = this;
+            const aFallbackRows = this._aLastFallbackRows || [];
+
+            const fnDoExport = function (aData) {
+                if (!aData || !aData.length) {
+                    MessageToast.show("No records to export");
+                    return;
+                }
+
+                const aCols = [
+                    { label: "TCR Number", property: "TCRNumber" },
+                    { label: "Process Ref ID", property: "ProcessingId" },
+                    { label: "Object Type", property: "ObjectType" },
+                    { label: "Source Object Number", property: "SourceNumber" },
+                    { label: "Message Type", property: "Type" },
+                    { label: "Message", property: "Message" },
+                    { label: "Target Object Number", property: "TargetNumber" },
+                    { label: "System", property: "Systemm" }
+                ];
+
+                const oSheet = new Spreadsheet({
+                    workbook: { columns: aCols },
+                    dataSource: aData,
+                    fileName: "TCR_Copy_Log.xlsx"
+                });
+
+                oSheet.build()
+                    .then(function () {
+                        MessageToast.show("Excel downloaded successfully");
+                    })
+                    .finally(function () {
+                        oSheet.destroy();
+                    });
+            };
+
+            if (!this._oLastFilter) {
+                // If there is no filter for processing id, then it is only fallback rows
+                fnDoExport(aFallbackRows);
                 return;
             }
 
-            const aCols = [
-                { label: "TCR Number", property: "TCRNumber" },
-                { label: "Process Ref ID", property: "ProcessingId" },
-                { label: "Object Type", property: "ObjectType" },
-                { label: "Source Object Number", property: "SourceNumber" },
-                { label: "Message Type", property: "Type" },
-                { label: "Message", property: "Message" },
-                { label: "Target Object Number", property: "TargetNumber" },
-                { label: "System", property: "Systemm" }
-            ];
+            // If there are filters, then fetch data and downlaod to excel
+            const iBatchSize = 5000;
+            let aAllResults = [];
+            const oModel = this.getView().getModel();
 
-            const oSheet = new Spreadsheet({
-                workbook: { columns: aCols },
-                dataSource: aData,
-                fileName: "TCR_Copy_Log.xlsx"
-            });
+            BusyIndicator.show(0);
 
-            oSheet.build()
-                .then(function () {
-                    MessageToast.show("Excel downloaded successfully");
-                })
-                .finally(function () {
-                    oSheet.destroy();
+            const fnReadBatch = function (iSkip, iKnownTotal) {
+                oModel.read("/ProcessLog", {
+                    filters: [that._oLastFilter],
+                    sorters: that._aLastSorters,
+                    urlParameters: Object.assign(
+                        { "$top": iBatchSize, "$skip": iSkip },
+                        // ask for the total count only on the very first request
+                        iSkip === 0 ? { "$inlinecount": "allpages" } : {}
+                    ),
+                    success: function (oData) {
+                        const aBatch = (oData.results || []).map(function (oLog) {
+                            return Object.assign({}, oLog, {
+                                TCRNumber: oLog.ParentTCR || (that._mapPidToTcr && that._mapPidToTcr[String(oLog.ProcessingId)]) || ""
+                            });
+                        });
+                        aAllResults = aAllResults.concat(aBatch);
+
+                        const iTotal = (iSkip === 0 && oData.__count) ? parseInt(oData.__count, 10) : iKnownTotal;
+
+                        MessageToast.show(
+                            iTotal
+                                ? "Loaded " + aAllResults.length + " of " + iTotal + " rows..."
+                                : "Loaded " + aAllResults.length + " rows so far..."
+                        );
+
+                        // a full batch came back -> there might be more, ask for the next page
+                        const bMoreDataLikely = aBatch.length === iBatchSize;
+                        if (bMoreDataLikely) {
+                            fnReadBatch(iSkip + iBatchSize, iTotal);
+                        } else {
+                            BusyIndicator.hide();
+                            const aFinalResults = aAllResults.concat(aFallbackRows);
+                            aFinalResults.sort(function (a, b) {
+                                return Number(a.TCRNumber) - Number(b.TCRNumber);
+                            });
+                            MessageToast.show("All " + aFinalResults.length + " rows loaded. Preparing Excel file...");
+                            fnDoExport(aFinalResults);
+                        }
+                    },
+                    error: function () {
+                        BusyIndicator.hide();
+                        MessageToast.show("Error fetching process logs for export");
+                    }
                 });
+            };
+
+            fnReadBatch(0, null);
         }
     };
 });
